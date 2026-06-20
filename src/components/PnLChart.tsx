@@ -53,7 +53,7 @@ export function PnLChart({ totalValueUsd, nativeBalance }: Props) {
 
         // Scale: last point of ETH history should represent current ETH portion of portfolio
         // This is a rough approximation — a full solution needs token-by-token history
-        const lastEthPrice = ethHistory.at(-1)?.price ?? 1;
+        const lastEthPrice = ethHistory[ethHistory.length - 1]?.price ?? 1;
         const ethValue = lastEthPrice * nativeBalance;
         const scale = totalValueUsd > 0 ? totalValueUsd / Math.max(ethValue, 1) : 1;
 
@@ -73,7 +73,7 @@ export function PnLChart({ totalValueUsd, nativeBalance }: Props) {
     return () => { cancelled = true; };
   }, [period, totalValueUsd, nativeBalance]);
 
-  const isUp = data.length >= 2 && data.at(-1)!.value >= data[0].value;
+  const isUp = data.length >= 2 && data[data.length - 1].value >= data[0].value;
   const color = isUp ? '#22c55e' : '#ef4444';
 
   return (
