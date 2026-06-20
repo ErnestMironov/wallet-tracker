@@ -1,6 +1,5 @@
 import type { TokenTransfer, NativeTx, TokenHolding, PnLSummary } from '../types';
-import { resolveSymbolToId, getPrices, getHistoricalPrice, getTokenPricesByAddress, getCoinPriceHistoryRange } from './api/coingecko';
-import { sleep } from './utils';
+import { resolveSymbolToId, getPrices, getCoinPriceHistoryRange } from './api/coingecko';
 import dayjs from 'dayjs';
 
 interface TxEvent {
@@ -11,6 +10,55 @@ interface TxEvent {
   tokenAddress: string; // 'native' for ETH/MATIC
   tokenDecimal: number;
   chainKey: string;
+}
+
+const TRACKED_ERC20: Record<string, Record<string, { symbol: string }>> = {
+  base: {
+    '0x4200000000000000000000000000000000000006': { symbol: 'WETH' },
+    '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { symbol: 'USDC' },
+    '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': { symbol: 'USDC' },
+    '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2': { symbol: 'USDT' },
+  },
+  ethereum: {
+    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': { symbol: 'WETH' },
+    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': { symbol: 'USDC' },
+    '0xdac17f958d2ee523a2206206994597c13d831ec7': { symbol: 'USDT' },
+  },
+  polygon: {
+    '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': { symbol: 'WETH' },
+    '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': { symbol: 'USDC' },
+    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': { symbol: 'USDC' },
+    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': { symbol: 'USDT' },
+  },
+  arbitrum: {
+    '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': { symbol: 'WETH' },
+    '0xaf88d065e77c8cc2239327c5edb3a432268e5831': { symbol: 'USDC' },
+    '0xff970a61a04b1ca14834a43f5de4533ebddb5cc8': { symbol: 'USDC' },
+    '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': { symbol: 'USDT' },
+  },
+  optimism: {
+    '0x4200000000000000000000000000000000000006': { symbol: 'WETH' },
+    '0x0b2c639c533813f4aa9d7837caf62653d097ff85': { symbol: 'USDC' },
+    '0x7f5c764cbc14f9669b88837ca1490cca17c31607': { symbol: 'USDC' },
+    '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': { symbol: 'USDT' },
+  },
+};
+
+const STABLE_COIN_IDS = new Set(['usd-coin', 'tether']);
+
+function trackedEvent(ev: TxEvent): TxEvent | null {
+  if (ev.tokenAddress === 'native') {
+    return ev.tokenSymbol.toUpperCase() === 'ETH'
+      ? { ...ev, tokenSymbol: 'ETH' }
+      : null;
+  }
+
+  const token = TRACKED_ERC20[ev.chainKey]?.[ev.tokenAddress.toLowerCase()];
+  return token ? { ...ev, tokenSymbol: token.symbol } : null;
+}
+
+function historySourceId(coinId: string): string {
+  return coinId === 'weth' ? 'ethereum' : coinId;
 }
 
 function transfersToEvents(
@@ -63,7 +111,10 @@ export async function computeHoldings(
   for (const [chainKey, transfers] of Object.entries(erc20ByChain)) {
     const native = nativeByChain[chainKey] ?? [];
     const symbol = nativeSymbolByChain[chainKey] ?? 'ETH';
-    allEvents.push(...transfersToEvents(transfers, native, chainKey, symbol));
+    for (const ev of transfersToEvents(transfers, native, chainKey, symbol)) {
+      const tracked = trackedEvent(ev);
+      if (tracked) allEvents.push(tracked);
+    }
   }
 
   // Group events by (chainKey, tokenAddress)
@@ -90,37 +141,25 @@ export async function computeHoldings(
   const validIds = [...new Set(Object.values(symbolToId).filter(Boolean) as string[])];
   const nativePrices = validIds.length > 0 ? await getPrices(validIds) : {};
 
-  // 2) ERC-20 tokens: batch-fetch by contract address per chain (one API call per chain)
-  const addressPricesByChain: Record<string, Record<string, number>> = {};
-  const chainKeys = [...new Set([...groups.keys()].map((k) => k.split(':')[0]))];
-  for (const chainKey of chainKeys) {
-    const addrs = [...groups.entries()]
-      .filter(([k]) => k.startsWith(chainKey + ':'))
-      .map(([k]) => k.split(':')[1])
-      .filter((a) => a !== 'native');
-    if (addrs.length > 0) {
-      onProgress?.(`Fetching ${addrs.length} token prices on ${chainKey}…`);
-      addressPricesByChain[chainKey] = await getTokenPricesByAddress(chainKey, addrs);
-    }
-  }
-
-  // Merge: address-based prices take priority, then native/known-symbol prices
+  // Current prices are resolved by canonical IDs only. Token filtering is address-based above.
   const currentPrices: Record<string, number> = { ...nativePrices };
 
-  // Pre-fetch full price history for all known coin IDs — one API call each
-  // Use range endpoint (no day-count limit on free tier) from Jan 1 2024 → now
+  // CoinGecko's browser/free API is rate-limited. Fetch history only for ETH/WETH,
+  // use the current price for stablecoins, and keep the range within the free window.
   const coinPriceHistory: Record<string, Record<string, number>> = {}; // coinId → { date → price }
   const uniqueCoinIds = [...new Set(Object.values(symbolToId).filter(Boolean) as string[])];
-  if (uniqueCoinIds.length > 0) {
-    onProgress?.(`Fetching price history for ${uniqueCoinIds.length} tokens…`);
-    const fromTs = Math.floor(new Date('2023-01-01').getTime() / 1000);
+  const historySourceIds = [...new Set(uniqueCoinIds
+    .filter((coinId) => !STABLE_COIN_IDS.has(coinId))
+    .map(historySourceId))];
+  if (historySourceIds.length > 0) {
+    onProgress?.(`Fetching price history for ETH/WETH…`);
+    const fromTs = Math.floor((Date.now() - 365 * 24 * 60 * 60 * 1000) / 1000);
     const toTs = Math.floor(Date.now() / 1000);
-    for (const coinId of uniqueCoinIds) {
+    for (const coinId of historySourceIds) {
       const history = await getCoinPriceHistoryRange(coinId, fromTs, toTs);
       if (history.length > 0) {
         coinPriceHistory[coinId] = Object.fromEntries(history.map((h) => [h.date, h.price]));
       }
-      await sleep(300);
     }
   }
 
@@ -128,37 +167,15 @@ export async function computeHoldings(
 
   // Process each token group
   let processed = 0;
-  for (const [groupKey, group] of groups) {
+  for (const [, group] of groups) {
     const { events, symbol, chainKey } = group;
     const coinId = symbolToId[symbol];
-    const tokenAddress = groupKey.split(':')[1]; // may be 'native'
 
-    // Resolve current price: by address first, then by known coin ID
-    const addrPrice = tokenAddress !== 'native'
-      ? (addressPricesByChain[chainKey]?.[tokenAddress.toLowerCase()] ?? null)
-      : null;
-    const resolvedCurrentPrice = addrPrice ?? (coinId ? (currentPrices[coinId] ?? null) : null);
+    const resolvedCurrentPrice = coinId ? (currentPrices[coinId] ?? null) : null;
 
-    // Build historical price lookup: daily chart first, then fall back to per-date API
-    // This covers both BUY and SELL dates for accurate PnL calculation
-    const histPrices: Record<string, number> = coinId ? { ...(coinPriceHistory[coinId] ?? {}) } : {};
-
-    // For sell dates not covered by the 365-day chart, fall back to per-date lookup
-    const coveredDates = new Set(Object.keys(histPrices));
-    const missingSellDates: string[] = [];
-    for (const ev of events) {
-      if (ev.direction === 'out') {
-        const date = dayjs.unix(ev.timeStamp).format('YYYY-MM-DD');
-        if (!coveredDates.has(date) && coinId) missingSellDates.push(date);
-      }
-    }
-    if (missingSellDates.length > 0 && coinId) {
-      for (const date of missingSellDates) {
-        const p = await getHistoricalPrice(coinId, date);
-        if (p != null) histPrices[date] = p;
-        await sleep(200);
-      }
-    }
+    const histPrices: Record<string, number> = coinId
+      ? { ...(coinPriceHistory[historySourceId(coinId)] ?? {}) }
+      : {};
 
     // Average cost basis tracking
     const costBasis: CostBasisEntry = { totalCost: 0, totalAmount: 0 };

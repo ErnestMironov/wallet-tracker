@@ -104,10 +104,6 @@ export default function App() {
     }
   }
 
-  const nativeBalance = state
-    ? Object.values(state.nativeBalanceByChain).reduce((s, v) => s + v, 0)
-    : 0;
-
   return (
     <div className="min-h-screen bg-[#0d0e11] text-gray-100">
       {/* Header */}
@@ -159,7 +155,7 @@ export default function App() {
         {state && !loading && (
           <>
             <PortfolioSummary summary={state.summary} />
-            <PnLChart totalValueUsd={state.summary.totalValueUsd} nativeBalance={nativeBalance} />
+            <PnLChart totalValueUsd={state.summary.totalValueUsd} />
 
             {/* Tabs */}
             <div className="flex gap-1 bg-[#18191d] border border-[#2a2b2f] rounded-xl p-1 w-fit">

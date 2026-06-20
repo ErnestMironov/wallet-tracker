@@ -1,11 +1,16 @@
 import { sleep } from '../utils';
 
 const BASE = 'https://api.coingecko.com/api/v3';
+const MIN_REQUEST_INTERVAL_MS = 1500;
+const MAX_RETRIES = 1;
 
 // In-memory cache
 const priceCache = new Map<string, number>();
 const histPriceCache = new Map<string, number>(); // key: `${coinId}:${dateStr}`
+const priceHistoryCache = new Map<string, Array<{ date: string; price: number }>>();
 const symbolToIdCache = new Map<string, string | null>();
+const pendingRequests = new Map<string, Promise<unknown>>();
+let nextRequestAt = 0;
 
 // CoinGecko platform IDs for EVM chains
 const CHAIN_PLATFORM: Record<string, string> = {
@@ -56,14 +61,35 @@ const KNOWN_IDS: Record<string, string> = {
 async function cgFetch<T>(path: string, params: Record<string, string> = {}): Promise<T> {
   const url = new URL(`${BASE}${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  // CoinGecko free tier rate limit: ~10-30 req/min
+  const cacheKey = url.toString();
+  const pending = pendingRequests.get(cacheKey) as Promise<T> | undefined;
+  if (pending) return pending;
+
+  const request = fetchWithRateLimit<T>(url, path);
+  pendingRequests.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    pendingRequests.delete(cacheKey);
+  }
+}
+
+async function fetchWithRateLimit<T>(url: URL, path: string, attempt = 0): Promise<T> {
+  const now = Date.now();
+  const waitMs = Math.max(0, nextRequestAt - now);
+  nextRequestAt = Math.max(now, nextRequestAt) + MIN_REQUEST_INTERVAL_MS;
+  if (waitMs > 0) await sleep(waitMs);
+
   const res = await fetch(url.toString(), {
     headers: { Accept: 'application/json' },
   });
-  if (res.status === 429) {
-    await sleep(6000);
-    return cgFetch(path, params);
+
+  if (res.status === 429 && attempt < MAX_RETRIES) {
+    const retryAfter = Number(res.headers.get('retry-after'));
+    await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 8000);
+    return fetchWithRateLimit(url, path, attempt + 1);
   }
+
   if (!res.ok) throw new Error(`CoinGecko ${res.status}: ${path}`);
   return res.json() as Promise<T>;
 }
@@ -129,7 +155,9 @@ export async function getTokenPricesByAddress(
   if (!platform || addresses.length === 0) return {};
 
   const result: Record<string, number> = {};
-  const chunks = chunk(addresses, 100); // CoinGecko allows up to 100 addresses
+  const validAddresses = [...new Set(addresses.map((addr) => addr.toLowerCase()))]
+    .filter((addr) => /^0x[0-9a-f]{40}$/.test(addr) && addr !== '0x0000000000000000000000000000000000000000');
+  const chunks = chunk(validAddresses, 50);
 
   for (const ch of chunks) {
     try {
@@ -158,14 +186,17 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 /**
- * Get price history using market_chart/range — no day-count limit on free tier.
- * fromTs and toTs are Unix seconds.
+ * Get price history using market_chart/range.
+ * Keep callers on short ranges: CoinGecko's browser/free API rejects large windows.
  */
 export async function getCoinPriceHistoryRange(
   coinId: string,
   fromTs: number,
   toTs: number,
 ): Promise<Array<{ date: string; price: number }>> {
+  const cacheKey = `range:${coinId}:${fromTs}:${toTs}`;
+  if (priceHistoryCache.has(cacheKey)) return priceHistoryCache.get(cacheKey)!;
+
   try {
     const data = await cgFetch<{ prices: [number, number][] }>(
       `/coins/${coinId}/market_chart/range`,
@@ -180,7 +211,9 @@ export async function getCoinPriceHistoryRange(
     for (const [ts, price] of data.prices) {
       byDate.set(new Date(ts).toISOString().slice(0, 10), price);
     }
-    return [...byDate.entries()].map(([date, price]) => ({ date, price }));
+    const history = [...byDate.entries()].map(([date, price]) => ({ date, price }));
+    priceHistoryCache.set(cacheKey, history);
+    return history;
   } catch {
     return [];
   }
@@ -191,15 +224,20 @@ export async function getCoinPriceHistory(
   coinId: string,
   days: number,
 ): Promise<Array<{ date: string; price: number }>> {
+  const cacheKey = `days:${coinId}:${days}`;
+  if (priceHistoryCache.has(cacheKey)) return priceHistoryCache.get(cacheKey)!;
+
   try {
     const data = await cgFetch<{ prices: [number, number][] }>(
       `/coins/${coinId}/market_chart`,
       { vs_currency: 'usd', days: String(days), interval: 'daily' },
     );
-    return data.prices.map(([ts, price]) => ({
+    const history = data.prices.map(([ts, price]) => ({
       date: new Date(ts).toISOString().slice(0, 10),
       price,
     }));
+    priceHistoryCache.set(cacheKey, history);
+    return history;
   } catch {
     return [];
   }

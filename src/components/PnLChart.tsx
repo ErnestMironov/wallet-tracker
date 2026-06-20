@@ -14,7 +14,6 @@ import dayjs from 'dayjs';
 
 interface Props {
   totalValueUsd: number;
-  nativeBalance: number; // ETH amount on Base (used as proxy for chart)
 }
 
 const PERIODS = [
@@ -23,6 +22,18 @@ const PERIODS = [
   { label: '90D', days: 90 },
   { label: '1Y', days: 365 },
 ] as const;
+
+function flatChartData(days: number, value: number): Array<{ date: string; value: number }> {
+  const points = Math.min(days, 30);
+
+  return Array.from({ length: points }, (_, i) => {
+    const daysAgo = Math.round((days - 1) * (points - 1 - i) / Math.max(points - 1, 1));
+    return {
+      date: dayjs().subtract(daysAgo, 'day').format('MMM D'),
+      value,
+    };
+  });
+}
 
 // Custom tooltip
 function CustomTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number }>; label?: string }) {
@@ -35,13 +46,17 @@ function CustomTooltip({ active, payload, label }: { active?: boolean; payload?:
   );
 }
 
-export function PnLChart({ totalValueUsd, nativeBalance }: Props) {
+export function PnLChart({ totalValueUsd }: Props) {
   const [data, setData] = useState<Array<{ date: string; value: number }>>([]);
   const [period, setPeriod] = useState<(typeof PERIODS)[number]>(PERIODS[1]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (totalValueUsd <= 0) return;
+    if (totalValueUsd <= 0) {
+      setData([]);
+      return;
+    }
+
     let cancelled = false;
     setLoading(true);
 
@@ -51,15 +66,19 @@ export function PnLChart({ totalValueUsd, nativeBalance }: Props) {
         const ethHistory = await getCoinPriceHistory('ethereum', period.days);
         if (cancelled) return;
 
-        // Scale: last point of ETH history should represent current ETH portion of portfolio
-        // This is a rough approximation — a full solution needs token-by-token history
+        if (ethHistory.length === 0) {
+          setData(flatChartData(period.days, totalValueUsd));
+          return;
+        }
+
+        // Scale ETH price shape to the whole tracked portfolio value.
+        // This keeps the chart useful even when holdings are WETH/stables, not native ETH.
         const lastEthPrice = ethHistory[ethHistory.length - 1]?.price ?? 1;
-        const ethValue = lastEthPrice * nativeBalance;
-        const scale = totalValueUsd > 0 ? totalValueUsd / Math.max(ethValue, 1) : 1;
+        const scale = totalValueUsd / Math.max(lastEthPrice, 1);
 
         const points = ethHistory.map((p) => ({
           date: dayjs(p.date).format('MMM D'),
-          value: p.price * nativeBalance * scale,
+          value: p.price * scale,
         }));
 
         setData(points);
@@ -71,7 +90,7 @@ export function PnLChart({ totalValueUsd, nativeBalance }: Props) {
     })();
 
     return () => { cancelled = true; };
-  }, [period, totalValueUsd, nativeBalance]);
+  }, [period, totalValueUsd]);
 
   const isUp = data.length >= 2 && data[data.length - 1].value >= data[0].value;
   const color = isUp ? '#22c55e' : '#ef4444';
@@ -147,7 +166,7 @@ export function PnLChart({ totalValueUsd, nativeBalance }: Props) {
       </div>
 
       <p className="text-[10px] text-gray-600">
-        Chart uses ETH price history as portfolio shape approximation. Exact per-token history requires historical price fetching.
+        Chart uses ETH price history as a portfolio shape approximation and falls back to current value when CoinGecko is rate-limited.
       </p>
     </div>
   );
