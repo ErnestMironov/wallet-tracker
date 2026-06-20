@@ -1,5 +1,6 @@
 import type { TokenTransfer, NativeTx, TokenHolding, PnLSummary } from '../types';
 import { resolveSymbolToId, getPrices, getCoinPriceHistoryRange } from './api/coingecko';
+import { TRACKED_ERC20, getTrackedTokenByAddress } from './trackedTokens';
 import dayjs from 'dayjs';
 
 interface TxEvent {
@@ -12,38 +13,6 @@ interface TxEvent {
   chainKey: string;
 }
 
-const TRACKED_ERC20: Record<string, Record<string, { symbol: string }>> = {
-  base: {
-    '0x4200000000000000000000000000000000000006': { symbol: 'WETH' },
-    '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { symbol: 'USDC' },
-    '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': { symbol: 'USDC' },
-    '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2': { symbol: 'USDT' },
-  },
-  ethereum: {
-    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': { symbol: 'WETH' },
-    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': { symbol: 'USDC' },
-    '0xdac17f958d2ee523a2206206994597c13d831ec7': { symbol: 'USDT' },
-  },
-  polygon: {
-    '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': { symbol: 'WETH' },
-    '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': { symbol: 'USDC' },
-    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': { symbol: 'USDC' },
-    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': { symbol: 'USDT' },
-  },
-  arbitrum: {
-    '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': { symbol: 'WETH' },
-    '0xaf88d065e77c8cc2239327c5edb3a432268e5831': { symbol: 'USDC' },
-    '0xff970a61a04b1ca14834a43f5de4533ebddb5cc8': { symbol: 'USDC' },
-    '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': { symbol: 'USDT' },
-  },
-  optimism: {
-    '0x4200000000000000000000000000000000000006': { symbol: 'WETH' },
-    '0x0b2c639c533813f4aa9d7837caf62653d097ff85': { symbol: 'USDC' },
-    '0x7f5c764cbc14f9669b88837ca1490cca17c31607': { symbol: 'USDC' },
-    '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': { symbol: 'USDT' },
-  },
-};
-
 const STABLE_COIN_IDS = new Set(['usd-coin', 'tether']);
 
 function trackedEvent(ev: TxEvent): TxEvent | null {
@@ -53,8 +22,8 @@ function trackedEvent(ev: TxEvent): TxEvent | null {
       : null;
   }
 
-  const token = TRACKED_ERC20[ev.chainKey]?.[ev.tokenAddress.toLowerCase()];
-  return token ? { ...ev, tokenSymbol: token.symbol } : null;
+  const token = getTrackedTokenByAddress(ev.chainKey, ev.tokenAddress);
+  return token ? { ...ev, tokenSymbol: token.symbol, tokenDecimal: token.decimals } : null;
 }
 
 function historySourceId(coinId: string): string {
@@ -103,6 +72,7 @@ export async function computeHoldings(
   erc20ByChain: Record<string, TokenTransfer[]>,
   nativeByChain: Record<string, NativeTx[]>,
   nativeBalanceByChain: Record<string, number>,
+  erc20BalanceByChain: Record<string, Record<string, number>>,
   nativeSymbolByChain: Record<string, string>,
   onProgress?: (msg: string) => void,
 ): Promise<{ holdings: TokenHolding[]; summary: PnLSummary }> {
@@ -127,6 +97,29 @@ export async function computeHoldings(
       groups.set(key, { events: [], symbol: ev.tokenSymbol, chainKey: ev.chainKey });
     }
     groups.get(key)!.events.push(ev);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  for (const [chainKey, balances] of Object.entries(erc20BalanceByChain)) {
+    for (const token of TRACKED_ERC20[chainKey] ?? []) {
+      const balance = balances[token.address] ?? 0;
+      const key = `${chainKey}:${token.address}`;
+      if (balance > 0.000001 && !groups.has(key)) {
+        groups.set(key, {
+          chainKey,
+          symbol: token.symbol,
+          events: [{
+            timeStamp: now,
+            direction: 'in',
+            amount: balance,
+            tokenSymbol: token.symbol,
+            tokenAddress: token.address,
+            tokenDecimal: token.decimals,
+            chainKey,
+          }],
+        });
+      }
+    }
   }
 
   // Resolve prices
@@ -215,11 +208,14 @@ export async function computeHoldings(
 
     // Override balance with on-chain balance for native token
     let finalBalance = currentBalance;
-    if (group.events[0]?.tokenAddress === 'native') {
+    const tokenAddress = group.events[0]?.tokenAddress ?? 'unknown';
+    if (tokenAddress === 'native') {
       finalBalance = nativeBalanceByChain[chainKey] ?? currentBalance;
+    } else {
+      finalBalance = erc20BalanceByChain[chainKey]?.[tokenAddress.toLowerCase()] ?? currentBalance;
     }
 
-    if (finalBalance < 0.000001 && realizedPnl === 0) continue;
+    if (finalBalance < 0.000001) continue;
 
     // Filter spam/scam tokens:
     // - no known price AND never paid for it (avg cost = 0) → airdrop spam
@@ -246,7 +242,7 @@ export async function computeHoldings(
         : null;
 
     holdings.push({
-      address: group.events[0]?.tokenAddress ?? 'unknown',
+      address: tokenAddress,
       symbol,
       name: symbol,
       decimals: group.events[0]?.tokenDecimal ?? 18,

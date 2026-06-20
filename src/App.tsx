@@ -7,7 +7,7 @@ import { TransactionList } from './components/TransactionList';
 import { ProfitCalculator } from './components/ProfitCalculator';
 import { Settings } from './components/Settings';
 import { shortAddr } from './lib/utils';
-import { getERC20Transfers, getNativeTxs, getNativeBalance } from './lib/api/explorer';
+import { getERC20Transfers, getNativeTxs, getNativeBalance, getTrackedERC20Balances } from './lib/api/explorer';
 import { computeHoldings } from './lib/pnl';
 import { saveWallet, getSavedWallets } from './lib/storage';
 import { CHAINS } from './lib/chains';
@@ -23,6 +23,7 @@ interface TrackerState {
   erc20ByChain: Record<string, TokenTransfer[]>;
   nativeByChain: Record<string, NativeTx[]>;
   nativeBalanceByChain: Record<string, number>;
+  erc20BalanceByChain: Record<string, Record<string, number>>;
 }
 
 export default function App() {
@@ -50,27 +51,31 @@ export default function App() {
       const erc20ByChain: Record<string, TokenTransfer[]> = {};
       const nativeByChain: Record<string, NativeTx[]> = {};
       const nativeBalanceByChain: Record<string, number> = {};
+      const erc20BalanceByChain: Record<string, Record<string, number>> = {};
       const nativeSymbolByChain: Record<string, string> = {};
 
       for (const chainKey of chains) {
         const chain = CHAINS[chainKey];
         if (!chain) continue;
-        setProgress(`Fetching ${chain.name} transactions…`);
+        setProgress(`Fetching ${chain.name} data…`);
         try {
-          const [erc20, native, nativeBal] = await Promise.all([
+          const [erc20, native, nativeBal, erc20Balances] = await Promise.all([
             getERC20Transfers(chainKey, address),
             getNativeTxs(chainKey, address),
             getNativeBalance(chainKey, address),
+            getTrackedERC20Balances(chainKey, address),
           ]);
           erc20ByChain[chainKey] = erc20;
           nativeByChain[chainKey] = native;
           nativeBalanceByChain[chainKey] = nativeBal;
+          erc20BalanceByChain[chainKey] = erc20Balances;
           nativeSymbolByChain[chainKey] = chain.symbol;
         } catch (err) {
           console.warn(`Failed to fetch ${chainKey}:`, err);
           erc20ByChain[chainKey] = [];
           nativeByChain[chainKey] = [];
           nativeBalanceByChain[chainKey] = 0;
+          erc20BalanceByChain[chainKey] = {};
           nativeSymbolByChain[chainKey] = chain.symbol;
         }
       }
@@ -81,6 +86,7 @@ export default function App() {
         erc20ByChain,
         nativeByChain,
         nativeBalanceByChain,
+        erc20BalanceByChain,
         nativeSymbolByChain,
         (msg) => setProgress(msg),
       );
@@ -95,6 +101,7 @@ export default function App() {
         erc20ByChain,
         nativeByChain,
         nativeBalanceByChain,
+        erc20BalanceByChain,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');

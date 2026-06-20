@@ -1,6 +1,7 @@
 import type { TokenTransfer, NativeTx } from '../../types';
 import { CHAINS } from '../chains';
 import { getApiKeyForChain } from '../storage';
+import { TRACKED_ERC20 } from '../trackedTokens';
 import { formatTokenValue } from '../utils';
 
 async function explorerFetch(chainKey: string, params: Record<string, string>): Promise<unknown> {
@@ -21,6 +22,7 @@ async function explorerFetch(chainKey: string, params: Record<string, string>): 
   if (json.status === '0') {
     // Empty result is not an error — Blockscout and Etherscan phrase this differently
     if (Array.isArray(json.result) && json.result.length === 0) return [];
+    if (typeof json.result === 'string' && /^0+$/.test(json.result)) return json.result;
     const msg = (json.message ?? '').toLowerCase();
     const result = typeof json.result === 'string' ? json.result.toLowerCase() : '';
     if (
@@ -162,4 +164,41 @@ export async function getNativeBalance(chainKey: string, address: string): Promi
   })) as string;
   if (typeof raw !== 'string') return 0;
   return formatTokenValue(raw, 18);
+}
+
+export async function getERC20Balance(
+  chainKey: string,
+  address: string,
+  contractAddress: string,
+  decimals: number,
+): Promise<number> {
+  try {
+    const raw = (await explorerFetch(chainKey, {
+      module: 'account',
+      action: 'tokenbalance',
+      contractaddress: contractAddress,
+      address,
+      tag: 'latest',
+    })) as string;
+
+    if (typeof raw !== 'string') return 0;
+    return formatTokenValue(raw, decimals);
+  } catch {
+    return 0;
+  }
+}
+
+export async function getTrackedERC20Balances(
+  chainKey: string,
+  address: string,
+): Promise<Record<string, number>> {
+  const tokens = TRACKED_ERC20[chainKey] ?? [];
+  const balances = await Promise.all(
+    tokens.map(async (token) => [
+      token.address,
+      await getERC20Balance(chainKey, address, token.address, token.decimals),
+    ] as const),
+  );
+
+  return Object.fromEntries(balances);
 }

@@ -33,7 +33,60 @@ export function TokenTable({ holdings }: Props) {
       <div className="px-5 py-4 border-b border-[#2a2b2f]">
         <h2 className="text-sm font-semibold text-gray-200">Holdings</h2>
       </div>
-      <div className="overflow-x-auto">
+
+      <div className="md:hidden divide-y divide-[#1e1f23]">
+        {holdings.map((h, i) => (
+          <div key={`${h.chainKey}-${h.address}-${i}`} className="p-4 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <TokenLogo symbol={h.symbol} />
+                <div className="min-w-0">
+                  <div className="font-semibold text-gray-100 truncate">{h.symbol}</div>
+                  <ChainBadge chainKey={h.chainKey} small />
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="font-semibold text-gray-100">
+                  {h.valueUsd != null ? formatUsd(h.valueUsd) : '—'}
+                </div>
+                <div className={`text-xs font-medium ${pnlColor(h.totalPnlUsd)}`}>
+                  {h.totalPnlUsd != null ? formatUsd(h.totalPnlUsd) : '—'}
+                  {h.pnlPercent != null && (
+                    <span className="ml-1">({formatPct(h.pnlPercent)})</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-gray-600">Balance</div>
+                <div className="mt-1 font-mono text-gray-300">{formatAmount(h.balance)}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] uppercase tracking-wider text-gray-600">Price</div>
+                <div className="mt-1 text-gray-300">{h.priceUsd != null ? formatUsd(h.priceUsd) : '—'}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-gray-600">Avg Cost</div>
+                <div className="mt-1 text-gray-400">{h.avgCostUsd != null ? formatUsd(h.avgCostUsd) : '—'}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] uppercase tracking-wider text-gray-600">Realized</div>
+                <div className={`mt-1 ${pnlColor(h.realizedPnlUsd)}`}>{formatUsd(h.realizedPnlUsd)}</div>
+              </div>
+              <div className="col-span-2 flex items-center justify-between border-t border-[#24262b] pt-3">
+                <span className="text-[10px] uppercase tracking-wider text-gray-600">Unrealized</span>
+                <span className={pnlColor(h.unrealizedPnlUsd)}>
+                  {h.unrealizedPnlUsd != null ? formatUsd(h.unrealizedPnlUsd) : '—'}
+                </span>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-[11px] text-gray-600 uppercase tracking-wider">
