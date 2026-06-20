@@ -1,4 +1,4 @@
-const CACHE = 'wallet-tracker-v1';
+const CACHE = 'wallet-tracker-v2';
 const PRECACHE = ['/'];
 
 self.addEventListener('install', (e) => {
@@ -22,15 +22,14 @@ self.addEventListener('fetch', (e) => {
   if (url.origin !== location.origin) return;
 
   e.respondWith(
-    caches.match(e.request).then((cached) => {
-      const network = fetch(e.request).then((res) => {
+    fetch(e.request)
+      .then((res) => {
         if (res.ok) {
           const clone = res.clone();
           caches.open(CACHE).then((c) => c.put(e.request, clone));
         }
         return res;
-      });
-      return cached || network;
-    })
+      })
+      .catch(() => caches.match(e.request))
   );
 });
