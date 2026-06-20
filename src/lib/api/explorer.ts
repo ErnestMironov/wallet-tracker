@@ -172,17 +172,32 @@ export async function getERC20Balance(
   contractAddress: string,
   decimals: number,
 ): Promise<number> {
-  try {
-    const raw = (await explorerFetch(chainKey, {
-      module: 'account',
-      action: 'tokenbalance',
-      contractaddress: contractAddress,
-      address,
-      tag: 'latest',
-    })) as string;
+  const chain = CHAINS[chainKey];
+  if (!chain) return 0;
 
-    if (typeof raw !== 'string') return 0;
-    return formatTokenValue(raw, decimals);
+  try {
+    const paddedAddress = address.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+    const body = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_call',
+      params: [{
+        to: contractAddress,
+        data: `0x70a08231${paddedAddress}`,
+      }, 'latest'],
+    };
+
+    const res = await fetch(chain.rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return 0;
+
+    const json = (await res.json()) as { result?: string };
+    if (!json.result) return 0;
+
+    return formatTokenValue(BigInt(json.result).toString(), decimals);
   } catch {
     return 0;
   }
